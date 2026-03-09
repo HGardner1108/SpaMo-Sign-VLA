@@ -6,10 +6,10 @@ import glob
 
 
 def derangement(lst):
-    assert len(lst) > 1, "List must have at least two elements."
-    
+    if len(lst) <= 1:
+        return lst
+    shuffled = lst[:]
     while True:
-        shuffled = lst[:]
         random.shuffle(shuffled)
         if all(original != shuffled[i] for i, original in enumerate(lst)):
             return shuffled
@@ -69,14 +69,17 @@ def create_mask(seq_lengths: list, device="cpu"):
 
 
 def get_img_list(ds_name, vid_root, path):
-    # Handling for different datasets
     if ds_name == 'Phoenix14T':
-        img_path = os.path.join(vid_root, 'features', 'fullFrame-256x256px', path)
+        # path is already 'dev/ID/*.png', so we just join it to the root and features folder
+        img_path = os.path.join(vid_root, 'features', 'fullFrame-210x260px', path)
     elif ds_name == 'CSL-Daily':
         img_path = os.path.join(vid_root, 'CSL-Daily_256x256px', path)
     else:
         raise ValueError(f"Dataset {ds_name} is not supported.")
-    return sorted(glob.glob(img_path))
+    
+    # We use glob on the path provided by the metadata
+    files = sorted(glob.glob(img_path))
+    return files
 
 
 # Credit by https://stackoverflow.com/questions/77782599/how-can-i-extract-all-the-frames-from-a-particular-time-interval-in-a-video

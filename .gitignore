@@ -54,7 +54,6 @@ temp/
 tmp/
 
 # Project specific files
-# Add any project-specific files or directories you want to ignore
 
 *.exe
 *.dll
@@ -67,6 +66,41 @@ tmp/
 .hypothesis/
 *.ipynb
 
-datasets
-
 __pycache__
+
+# =============================================================================
+# Heavy files - ML models, weights, datasets, features
+# These are too large for git. Download/generate them separately.
+# =============================================================================
+
+# Pre-trained & fine-tuned model files (~22GB)
+models/
+
+# Model checkpoint weights (~5.6GB)
+weights/
+
+# Extracted video features (~7.8GB)
+features/
+
+# Dataset binary data (~119GB) — keeps dataset/*.py code files tracked
+dataset/Phoenix14T/
+
+# Translation pipeline test outputs
+Translation_Pipeline/translation_target/
+
+# Common ML binary formats
+*.ckpt
+*.pt
+*.pth
+*.bin
+*.safetensors
+*.h5
+*.hdf5
+*.onnx
+*.pkl
+
+# Large media files
+*.mp4
+*.avi
+*.mov
+*.mkv

@@ -528,10 +528,10 @@ class FlanT5SLT(AbstractSLT):
             generated = self.t5_model.generate(
                 inputs_embeds=input_embeds,
                 attention_mask=input_masks,
-                num_beams=5,
+                num_beams=self.t5_model.config.num_beams if hasattr(self.t5_model.config, 'num_beams') and self.t5_model.config.num_beams > 1 else 5,
                 max_length=self.max_txt_len,
-                top_p=0.9,
-                do_sample=True,
+                do_sample=False,
+                length_penalty=1.0,
             )
             
             # Decode generated outputs and references

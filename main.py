@@ -54,7 +54,7 @@ def get_parser() -> argparse.ArgumentParser:
         help='Run in training mode'
     )
     parser.add_argument(
-        '--test', type=bool, default=False,
+        '--test', type=str2bool, default=False,
         help='Run in testing mode'
     )
     parser.add_argument(
