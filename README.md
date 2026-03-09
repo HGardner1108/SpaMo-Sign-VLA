@@ -1,41 +1,119 @@
-# An Efficient Gloss-Free Sign Language Translation Using Spatial Configurations and Motion Dynamics with LLMs
+# SpaMo: Spatial and Motion-based Sign Language Translation
 
-Official implementation for the NAACL 2025 [paper](https://aclanthology.org/2025.naacl-long.197.pdf): An Efficient Gloss-Free Sign Language Translation Using Spatial Configurations and Motion Dynamics with LLMs
+Official implementation for the NAACL 2025 [paper](https://aclanthology.org/2025.naacl-long.197.pdf): *An Efficient Gloss-Free Sign Language Translation Using Spatial Configurations and Motion Dynamics with LLMs*
 
 
 ## Introduction
 
 ![model architecture](images/overview.png)
 
-We introduce a novel gloss-free framework, **Spa**tial and **Mo**tion-based Sign Language Translation (**SpaMo**). 
+We introduce a novel gloss-free framework, **Spa**tial and **Mo**tion-based Sign Language Translation (**SpaMo**).
 SpaMo is designed to fully exploit the spatial configurations and motion dynamics in sign videos using off-the-shelf visual encoders, without requiring domain-specific fine-tuning.
 As shown in the figure above, the core idea is simple: We extract spatial features (representing spatial configurations) and motion features (capturing motion dynamics) using two different visual encoders, then feed these into an LLM with a language prompt.
 
 
-## Environment
+## Architecture Overview
 
-Install dependencies using:
+| Component | Model | Purpose |
+|--|--|--|
+| **Spatial Encoder** | [CLIP ViT-Large-Patch14](https://huggingface.co/openai/clip-vit-large-patch14) | Extracts per-frame spatial features (body pose, hand shape), output dim: 1024 |
+| **Motion Encoder** | [VideoMAE-Large](https://huggingface.co/MCG-NJU/videomae-large) | Extracts temporal dynamics across sliding windows of 16 frames, output dim: 1024 |
+| **LLM Backbone** | [Flan-T5-XL](https://huggingface.co/google/flan-t5-xl) (~11GB) | Sequence-to-sequence translation with LoRA fine-tuning |
+| **SpaMo Adapter** | Custom (temporal conv + fusion MLP) | Fuses spatial & motion features and projects into T5's embedding space |
+
+
+## Installation
+
+### 1. Clone the repository
+
+```bash
+git clone https://github.com/HGardner1108/SpaMo-Sign-VLA.git
+cd SpaMo-Sign-VLA
+```
+
+### 2. Create a conda environment (recommended)
+
+```bash
+conda create -n spamo python=3.10 -y
+conda activate spamo
+```
+
+### 3. Install PyTorch (with CUDA)
+
+Install PyTorch matching your CUDA version. See [pytorch.org](https://pytorch.org/get-started/locally/) for the right command. For CUDA 11.8:
+
+```bash
+pip install torch==2.0.1 torchvision torchaudio --index-url https://download.pytorch.org/whl/cu118
+```
+
+### 4. Install dependencies
+
 ```bash
 pip install -r requirements.txt
+```
+
+Additional dependencies for the **live demo** (`live_spamo.py`):
+```bash
+pip install opencv-python mediapipe pytorch-grad-cam bitsandbytes
+```
+
+### 5. Download the LLM (Flan-T5-XL)
+
+The model auto-downloads from HuggingFace on first run into `./models/`. Alternatively, download manually:
+
+```bash
+# Option A: Auto-download (happens when you run training or translation)
+# The config uses model_name: google/flan-t5-xl with cache_dir: ./models
+
+# Option B: Manual download via huggingface-cli
+pip install huggingface-hub
+huggingface-cli download google/flan-t5-xl --local-dir ./models/flan-t5-xl
+```
+
+> **Note:** Flan-T5-XL is ~11GB. Ensure you have sufficient disk space and a GPU with at least 16GB VRAM (or use 4-bit quantization via the live demo).
+
+### 6. Download the SpaMo checkpoint
+
+Download the pre-trained SpaMo checkpoint (includes LoRA weights + adapter layers):
+
+```bash
+mkdir -p weights
+# Download from Dropbox:
+# https://www.dropbox.com/scl/fi/c9khflgxgl96lx919p6oq/spamo.ckpt?rlkey=gp3zmk6jwg9cnf3e2hpw268ih&st=u103orvs&dl=0
+# Save as: weights/spamo.ckpt
 ```
 
 
 ## Data Preparation
 
 We validate our method on three datasets:
-- [Phoenix-2014T](https://www-i6.informatik.rwth-aachen.de/~koller/RWTH-PHOENIX-2014-T/)
-- [CSL-Daily](http://home.ustc.edu.cn/~zhouh156/dataset/csl-daily/)
-- [How2Sign](https://how2sign.github.io/)
+- [Phoenix-2014T](https://www-i6.informatik.rwth-aachen.de/~koller/RWTH-PHOENIX-2014-T/) (German Sign Language → German)
+- [CSL-Daily](http://home.ustc.edu.cn/~zhouh156/dataset/csl-daily/) (Chinese Sign Language → Chinese)
+- [How2Sign](https://how2sign.github.io/) (American Sign Language → English)
 
-### Spatial and Motion Features
+### Pre-extracted Features (Recommended)
 
-SpaMo utilizes two complementary feature types:
-1. **Spatial Features**: Extracted with ViT models to capture static visual information
-2. **Motion Features**: Extracted with VideoMAE models to capture temporal dynamics
+Download our pre-extracted spatial and motion features from [Dropbox](https://www.dropbox.com/scl/fo/vgbws4cftewpoc6kudoap/AOtWs7adP4AvK0iT7KkWaJk?rlkey=nf3wp64zenqx3t2z695ndzcy7&st=9ydialet&dl=0) and place them under `./features/`:
 
-#### Extracting Spatial Features
+```
+features/
+├── spatial/
+│   └── clip-vit-large-patch14_feat_Phoenix14T/
+│       ├── train/
+│       ├── dev/
+│       └── test/
+└── motion/
+    └── mae_feat_Phoenix14T/
+        ├── train/
+        ├── dev/
+        └── test/
+```
 
-To extract spatial features using the CLIP ViT model:
+### Extracting Features Yourself
+
+#### Spatial Features (CLIP ViT-Large)
+
+The CLIP encoder is automatically downloaded from HuggingFace (`openai/clip-vit-large-patch14`) when you run the extraction script. Multi-scale feature extraction is used with `s2wrapping` at scales 1 and 2:
 
 ```bash
 python scripts/vit_extract_feature.py \
@@ -43,21 +121,16 @@ python scripts/vit_extract_feature.py \
     --model_name openai/clip-vit-large-patch14 \
     --video_root /PATH/TO/PHOENIX-2014-T-release-v3/PHOENIX-2014-T/ \
     --cache_dir /PATH/TO/CACHE_DIR \
-    --save_dir /PATH/TO/SAVE_DIR \
+    --save_dir ./features/spatial/clip-vit-large-patch14_feat_Phoenix14T \
     --s2_mode s2wrapping \
     --scales 1 2 \
     --batch_size 32 \
     --device cuda:0
 ```
 
-Key parameters:
-- `--model_name`: CLIP ViT model variant (default: openai/clip-vit-large-patch14)
-- `--s2_mode`: Use "s2wrapping" for multi-scale feature extraction
-- `--scales`: Scales for multi-scale feature extraction (default: 1 2)
+#### Motion Features (VideoMAE-Large)
 
-#### Extracting Motion Features
-
-To extract motion features using VideoMAE:
+The VideoMAE encoder is automatically downloaded from HuggingFace (`MCG-NJU/videomae-large`). Uses a sliding window of 16 frames with 8-frame overlap:
 
 ```bash
 python scripts/mae_extract_feature.py \
@@ -65,18 +138,14 @@ python scripts/mae_extract_feature.py \
     --model_name MCG-NJU/videomae-large \
     --video_root /PATH/TO/PHOENIX-2014-T-release-v3/PHOENIX-2014-T/ \
     --cache_dir /PATH/TO/CACHE_DIR \
-    --save_dir /PATH/TO/SAVE_DIR \
+    --save_dir ./features/motion/mae_feat_Phoenix14T \
     --overlap_size 8 \
     --batch_size 32 \
     --device cuda:0
 ```
 
-For convenience, you can download our pre-extracted features from [here](https://www.dropbox.com/scl/fo/vgbws4cftewpoc6kudoap/AOtWs7adP4AvK0iT7KkWaJk?rlkey=nf3wp64zenqx3t2z695ndzcy7&st=9ydialet&dl=0).
 
-
-## Model Training and Evaluation
-
-### Training
+## Training
 
 Train the SpaMo model with:
 
@@ -84,23 +153,118 @@ Train the SpaMo model with:
 python main.py -c configs/finetune.yaml -e bleu
 ```
 
-### Evaluation
+Key config parameters (in `configs/finetune.yaml`):
+
+| Parameter | Default | Description |
+|--|--|--|
+| `model_name` | `google/flan-t5-xl` | HuggingFace model ID for the LLM |
+| `cache_dir` | `./models` | Directory to cache/download the LLM |
+| `tuning_type` | `lora` | Fine-tuning strategy (`lora` or `freeze`) |
+| `lora_r` / `lora_alpha` | 16 / 32 | LoRA rank and scaling factor |
+| `fusion_mode` | `joint` | Feature fusion strategy |
+| `precision` | `bf16` | Training precision (requires Ampere+ GPU) |
+
+
+## Evaluation
 
 Evaluate a trained model using:
 
 ```bash
-python main.py -c configs/finetune.yaml -e bleu --train False --test True --ckpt /PATH/TO/CHECKPOINT
+python main.py -c configs/finetune.yaml -e bleu --train False --test True --ckpt ./weights/spamo.ckpt
 ```
 
-Replace `/PATH/TO/CHECKPOINT` with your model checkpoint path.
-Pre-trained checkpoints are available for download [here](https://www.dropbox.com/scl/fi/c9khflgxgl96lx919p6oq/spamo.ckpt?rlkey=gp3zmk6jwg9cnf3e2hpw268ih&st=u103orvs&dl=0).
+
+## Translation Pipeline (Inference on New Videos)
+
+Translate sign language videos using the standalone pipeline:
+
+### 1. Record a video
+
+```bash
+python Translation_Pipeline/record_webcam.py
+# Press 'q' to stop recording. Saves to Translation_Pipeline/translation_target/
+```
+
+### 2. Run translation
+
+```bash
+python Translation_Pipeline/translate_video.py \
+    --video_path Translation_Pipeline/translation_target/ \
+    --ckpt_path ./weights/spamo.ckpt \
+    --config_path ./configs/finetune.yaml
+```
+
+This will:
+1. Extract frames from the video (center-cropped to 210×260)
+2. Extract spatial features using CLIP ViT-Large (auto-downloaded)
+3. Extract motion features using VideoMAE-Large (auto-downloaded)
+4. Load SpaMo and generate a German translation
+5. Translate the German output to English using Flan-T5's multilingual capability
+
+
+## Live Demo
+
+Real-time sign language translation from webcam with Grad-CAM attention visualization:
+
+```bash
+python live_spamo.py
+```
+
+> **Requires:** A webcam, the Flan-T5-XL model in `./models/flan-t5-xl`, and the SpaMo checkpoint in `./weights/spamo.ckpt`. Uses 4-bit quantization to fit on consumer GPUs.
+
+Controls:
+- `q` — Quit
+- `g` — Toggle Grad-CAM heatmaps
+
+
+## Project Structure
+
+```
+SpaMo/
+├── configs/
+│   └── finetune.yaml          # Training & model configuration
+├── dataset/
+│   ├── datamodule.py          # PyTorch Lightning data module
+│   └── p14t.py                # Phoenix-2014T dataset loader
+├── features/                  # Pre-extracted visual features (not in git)
+├── models/                    # Cached LLM weights (not in git)
+├── weights/                   # SpaMo checkpoints (not in git)
+├── preprocess/                # Dataset annotation files
+├── scripts/
+│   ├── vit_extract_feature.py # CLIP spatial feature extraction
+│   └── mae_extract_feature.py # VideoMAE motion feature extraction
+├── spamo/
+│   ├── t5_slt.py              # Main SpaMo model (FlanT5SLT)
+│   ├── tconv.py               # Temporal convolution encoder
+│   ├── mm_projector.py        # Vision-language projection layers
+│   └── ...
+├── Translation_Pipeline/
+│   ├── translate_video.py     # End-to-end video translation
+│   └── record_webcam.py       # Webcam video recorder
+├── utils/
+│   ├── helpers.py             # Utility functions
+│   ├── s2wrapper.py           # Multi-scale ViT wrapper
+│   └── evaluate.py            # BLEU/ROUGE evaluation
+├── main.py                    # Training & evaluation entry point
+├── live_spamo.py              # Real-time webcam demo
+└── requirements.txt           # Python dependencies
+```
+
+
+## Hardware Requirements
+
+| Task | GPU VRAM | Disk Space |
+|--|--|--|
+| Training | ≥24 GB (e.g. RTX 3090/4090, A100) | ~155 GB (model + features + dataset) |
+| Evaluation / Translation | ≥16 GB | ~17 GB (model + checkpoint) |
+| Live Demo (4-bit) | ≥8 GB | ~17 GB (model + checkpoint) |
 
 
 ## Citation
 
-Please cite our works if you find this repo is helpful.
+Please cite our work if you find this repo helpful:
 
-```bash
+```bibtex
 @inproceedings{hwang2025efficient,
   title={An Efficient Sign Language Translation Using Spatial Configuration and Motion Dynamics with LLMs},
   author={Hwang, Eui Jun and Cho, Sukmin and Lee, Junmyeong and Park, Jong C},
