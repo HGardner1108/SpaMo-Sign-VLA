@@ -52,9 +52,9 @@ pip install torch==2.0.1 torchvision torchaudio --index-url https://download.pyt
 pip install -r requirements.txt
 ```
 
-Additional dependencies for the **live demo** (`live_spamo.py`):
+Additional dependencies for the **translation pipeline**:
 ```bash
-pip install opencv-python mediapipe pytorch-grad-cam bitsandbytes
+pip install opencv-python
 ```
 
 ### 5. Download the LLM (Flan-T5-XL)
@@ -202,21 +202,6 @@ This will:
 5. Translate the German output to English using Flan-T5's multilingual capability
 
 
-## Live Demo
-
-Real-time sign language translation from webcam with Grad-CAM attention visualization:
-
-```bash
-python live_spamo.py
-```
-
-> **Requires:** A webcam, the Flan-T5-XL model in `./models/flan-t5-xl`, and the SpaMo checkpoint in `./weights/spamo.ckpt`. Uses 4-bit quantization to fit on consumer GPUs.
-
-Controls:
-- `q` — Quit
-- `g` — Toggle Grad-CAM heatmaps
-
-
 ## Project Structure
 
 ```
@@ -245,9 +230,7 @@ SpaMo/
 │   ├── helpers.py             # Utility functions
 │   ├── s2wrapper.py           # Multi-scale ViT wrapper
 │   └── evaluate.py            # BLEU/ROUGE evaluation
-├── main.py                    # Training & evaluation entry point
-├── live_spamo.py              # Real-time webcam demo
-└── requirements.txt           # Python dependencies
+└── main.py                    # Training & evaluation entry point
 ```
 
 
@@ -257,7 +240,6 @@ SpaMo/
 |--|--|--|
 | Training | ≥24 GB (e.g. RTX 3090/4090, A100) | ~155 GB (model + features + dataset) |
 | Evaluation / Translation | ≥16 GB | ~17 GB (model + checkpoint) |
-| Live Demo (4-bit) | ≥8 GB | ~17 GB (model + checkpoint) |
 
 
 ## Citation
