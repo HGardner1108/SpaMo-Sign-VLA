@@ -145,35 +145,6 @@ python scripts/mae_extract_feature.py \
 ```
 
 
-## Training
-
-Train the SpaMo model with:
-
-```bash
-python main.py -c configs/finetune.yaml -e bleu
-```
-
-Key config parameters (in `configs/finetune.yaml`):
-
-| Parameter | Default | Description |
-|--|--|--|
-| `model_name` | `google/flan-t5-xl` | HuggingFace model ID for the LLM |
-| `cache_dir` | `./models` | Directory to cache/download the LLM |
-| `tuning_type` | `lora` | Fine-tuning strategy (`lora` or `freeze`) |
-| `lora_r` / `lora_alpha` | 16 / 32 | LoRA rank and scaling factor |
-| `fusion_mode` | `joint` | Feature fusion strategy |
-| `precision` | `bf16` | Training precision (requires Ampere+ GPU) |
-
-
-## Evaluation
-
-Evaluate a trained model using:
-
-```bash
-python main.py -c configs/finetune.yaml -e bleu --train False --test True --ckpt ./weights/spamo.ckpt
-```
-
-
 ## Translation Pipeline (Inference on New Videos)
 
 Translate sign language videos using the standalone pipeline:
@@ -238,7 +209,6 @@ SpaMo/
 
 | Task | GPU VRAM | Disk Space |
 |--|--|--|
-| Training | ≥24 GB (e.g. RTX 3090/4090, A100) | ~155 GB (model + features + dataset) |
 | Evaluation / Translation | ≥16 GB | ~17 GB (model + checkpoint) |
 
 
