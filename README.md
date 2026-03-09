@@ -1,4 +1,4 @@
-# SpaMo Sign-VLA: Real-Time Sign Language Translation
+# SpaMo Sign-VLA: Sign Language Translation
 
 This repository is adapted from the original [SpaMo](https://github.com/eddie-euijun-hwang/SpaMo) implementation by Hwang et al., published at NAACL 2025: *[An Efficient Gloss-Free Sign Language Translation Using Spatial Configurations and Motion Dynamics with LLMs](https://aclanthology.org/2025.naacl-long.197.pdf)*.
 
@@ -214,7 +214,7 @@ SpaMo/
 
 ## Citation
 
-Please cite our work if you find this repo helpful:
+This work is built on SpaMo. If you use this repository, please cite the original paper:
 
 ```bibtex
 @inproceedings{hwang2025efficient,
