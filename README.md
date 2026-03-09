@@ -1,15 +1,15 @@
-# SpaMo: Spatial and Motion-based Sign Language Translation
+# SpaMo Sign-VLA: Real-Time Sign Language Translation
 
-Official implementation for the NAACL 2025 [paper](https://aclanthology.org/2025.naacl-long.197.pdf): *An Efficient Gloss-Free Sign Language Translation Using Spatial Configurations and Motion Dynamics with LLMs*
+This repository is adapted from the original [SpaMo](https://github.com/eddie-euijun-hwang/SpaMo) implementation by Hwang et al., published at NAACL 2025: *[An Efficient Gloss-Free Sign Language Translation Using Spatial Configurations and Motion Dynamics with LLMs](https://aclanthology.org/2025.naacl-long.197.pdf)*.
+
+This fork extends the original codebase with a **real-time translation pipeline** — allowing you to record sign language via webcam and translate it to text using the pre-trained SpaMo model.
 
 
-## Introduction
+## Background
 
 ![model architecture](images/overview.png)
 
-We introduce a novel gloss-free framework, **Spa**tial and **Mo**tion-based Sign Language Translation (**SpaMo**).
-SpaMo is designed to fully exploit the spatial configurations and motion dynamics in sign videos using off-the-shelf visual encoders, without requiring domain-specific fine-tuning.
-As shown in the figure above, the core idea is simple: We extract spatial features (representing spatial configurations) and motion features (capturing motion dynamics) using two different visual encoders, then feed these into an LLM with a language prompt.
+SpaMo (**Spa**tial and **Mo**tion) is a gloss-free sign language translation framework that uses off-the-shelf visual encoders to extract spatial configurations and motion dynamics from sign videos, without requiring domain-specific fine-tuning. Spatial features (body pose, hand shape) and motion features (temporal dynamics) are extracted using two separate encoders, then fused and fed into an LLM with a language prompt to produce translations.
 
 
 ## Architecture Overview
