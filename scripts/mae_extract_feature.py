@@ -10,6 +10,17 @@ from transformers import VideoMAEModel, VideoMAEImageProcessor
 import sys
 sys.path.append('./')
 
+import signal
+
+stop_requested = False
+def sigint_handler(signum, frame):
+    global stop_requested
+    print("\n[Ctrl+C detected] Will exit gracefully after finishing the current video...")
+    stop_requested = True
+
+signal.signal(signal.SIGINT, sigint_handler)
+
+
 from utils.helpers import sliding_window_for_list, read_video, get_img_list
 
 _GLOBAL_SEED = 0
@@ -53,11 +64,13 @@ def get_parser():
     parser.add_argument('--save_dir', help='where to save the output', required=True)
     parser.add_argument('--model_name', help='ViT model name', default='MCG-NJU/videomae-large')
     parser.add_argument('--batch_size', type=int, default=32)
-    parser.add_argument('--device', help='device to use', default='cpu')
+    parser.add_argument('--device', help='device to use', default='cuda:0')
     parser.add_argument('--overlap_size', type=int, default=8)
     parser.add_argument('--mode', nargs='+', type=str)
     parser.add_argument('--nth_layer', type=int, default=-1)
     parser.add_argument('--cache_dir', help='cache dir for model', default=None)
+    parser.add_argument('--shard_id', type=int, default=0, help='shard ID for parallelization')
+    parser.add_argument('--num_shards', type=int, default=1, help='total shards for parallelization')
     return parser
 
 
@@ -65,7 +78,15 @@ def get_iterator(args, mode):
     batch_size = args.batch_size
 
     data = np.load(os.path.join(args.anno_root, f'{mode}_info.npy'), allow_pickle=True).item()
-    num = len(data) - 1
+    
+    # Apply sharding
+    keys = list(data.keys())
+    # filter out non-digit keys if any
+    keys = sorted([k for k in keys if k.isdigit()], key=lambda x: int(x))
+    
+    sharded_keys = keys[args.shard_id::args.num_shards]
+    num = len(sharded_keys)
+    
     ds_name = osp.split(args.anno_root)[-1]
 
     reader = VideoMAEFeatureReader(
@@ -76,15 +97,24 @@ def get_iterator(args, mode):
         cache_dir=args.cache_dir
     )
     
-    def iterate():
-        for i in range(num):
-            fname = data[i]['folder']
+    def iterate(save_path, postfix_template):
+        for k in sharded_keys:
+            item = data[k]
+            fid = item['fileid']
+            
+            # --- GLOBAL RESUME LOGIC ---
+            # Check if file exists before processing anything
+            target_file = osp.join(save_path, f'{fid}{postfix_template}.npy')
+            if osp.exists(target_file):
+                yield "SKIPPED", fid, None
+                continue
+            
+            fname = osp.join(args.video_root, item['folder'])
             
             if ds_name == 'Phoenix14T' or ds_name == 'CSL-Daily':
                 image_list = get_img_list(ds_name, args.video_root, fname)
                 
                 if len(image_list) < 16:
-                    len_diff = 16 - len(image_list)
                     image_list.extend([image_list[-1]] * (16 - len(image_list)))
                 image_list_chunks = sliding_window_for_list(image_list, window_size=16, overlap_size=args.overlap_size)
                 
@@ -98,30 +128,28 @@ def get_iterator(args, mode):
                     feats = reader.get_feats(video_batch).cpu().numpy()
                     video_feats.append(feats)
                     
-                yield np.concatenate(video_feats, axis=0), data[i]['fileid'], None
+                yield np.concatenate(video_feats, axis=0), fid, None
             
             else:
-                if ds_name == 'How2Sign':
-                    start_time, end_time = data[i]['original_info']['START_REALIGNED'], data[i]['original_info']['END_REALIGNED']
-                    videos = read_video(fname, start_time=start_time, end_time=end_time)
+                # How2Sign and others
+                videos = read_video(fname)
+                
+                if len(videos) > 0:
+                    if len(videos) < 16:
+                        videos.extend([videos[-1]] * (16 - len(videos)))
                     
-                    if len(videos) > 0:
-                        if len(videos) < 16:
-                            len_diff = 16 - len(videos)
-                            videos.extend([videos[-1]] * (16 - len(videos)))
-                        
-                        videos = sliding_window_for_list(videos, window_size=16, overlap_size=args.overlap_size)
-                        
-                        video_feats = []
-                        for j in range(0, len(videos), batch_size):
-                            video_batch = videos[j:min(j + batch_size, len(videos))]
-                            feats = reader.get_feats(video_batch).cpu().numpy()
-                            video_feats.append(feats)
-                        
-                        yield np.concatenate(video_feats, axis=0), data[i]['fileid'], str(start_time)
+                    videos = sliding_window_for_list(videos, window_size=16, overlap_size=args.overlap_size)
                     
-                    else:
-                        yield [], data[i]['fileid'], str(start_time)
+                    video_feats = []
+                    for j in range(0, len(videos), batch_size):
+                        video_batch = videos[j:min(j + batch_size, len(videos))]
+                        feats = reader.get_feats(video_batch).cpu().numpy()
+                        video_feats.append(feats)
+                    
+                    yield np.concatenate(video_feats, axis=0), fid, None
+                
+                else:
+                    yield [], fid, None
     
     return iterate, num
 
@@ -129,32 +157,44 @@ def main():
     parser = get_parser()
     args = parser.parse_args()
 
-    mode = ["dev", "test", "train"]
-    for m in mode:
+    # Determine modes to process
+    modes_to_process = args.mode if args.mode else ["dev", "test", "train"]
+    
+    for m in modes_to_process:
         ds_name = osp.split(args.anno_root)[-1]
         fname = f'mae_feat_{ds_name}'
         os.makedirs(osp.join(args.save_dir, fname, m), exist_ok=True)
     
         if ds_name == 'How2Sign':
-            if m == 'dev': _m = 'val'
-            else: _m = m
+            _m = m
         elif ds_name == 'NIASL2021':
-            if m == 'dev': _m = 'validation' 
+            _m = 'validation' if m == 'dev' else m
         else:
             _m = m
 
-        generator, num = get_iterator(args, _m)
-        iterator = generator()
+        save_path_base = osp.join(args.save_dir, fname, m)
+        postfix_template = f'_overlap-{args.overlap_size}'
 
+        generator, num = get_iterator(args, _m)
+        iterator = generator(save_path_base, postfix_template)
+
+        print(f"Starting/Resuming processing for mode: {m}")
         for vit_feat in tqdm.tqdm(iterator, total=num):
             feats, id, st = vit_feat
-            save_path = osp.join(args.save_dir, fname, m)
-            postfix = f'_overlap-{args.overlap_size}'
             
+            # Handle the skip signal
+            if isinstance(feats, str) and feats == "SKIPPED":
+                continue
+
+            postfix = postfix_template
             if st is not None:
                 postfix = f'_{st}{postfix}'
             
-            np.save(osp.join(save_path, f'{id}{postfix}.npy'), feats)
+            np.save(osp.join(save_path_base, f'{id}{postfix}.npy'), feats)
+
+            if stop_requested:
+                print("Graceful exit requested. Closing.")
+                sys.exit(0)
 
 
 if __name__ == "__main__":

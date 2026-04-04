@@ -8,9 +8,23 @@ import numpy as np
 import torch.nn.functional as F
 from PIL import Image
 from transformers import AutoImageProcessor, CLIPVisionModel
+import decord
+from threading import Thread
+from queue import Queue
 
 import sys
 sys.path.append('./')
+import gc
+import signal
+
+stop_requested = False
+def sigint_handler(signum, frame):
+    global stop_requested
+    print("\n[Ctrl+C detected] Will exit gracefully after finishing the current video...")
+    stop_requested = True
+
+signal.signal(signal.SIGINT, sigint_handler)
+
 
 from utils.s2wrapper import forward as multiscale_forward
 from utils.helpers import read_video, get_img_list
@@ -69,17 +83,31 @@ def get_parser():
     parser.add_argument('--batch_size', type=int, default=32)
     parser.add_argument('--nth_layer', type=int, default=-1)
     parser.add_argument('--cache_dir', help='cache dir for model', default=None)
+    parser.add_argument('--shard_id', type=int, default=0, help='shard ID for parallelization')
+    parser.add_argument('--num_shards', type=int, default=1, help='total shards for parallelization')
     
     parser.add_argument('--save_dir', help='where to save the output', required=True)
     parser.add_argument('--model_name', help='ViT model name', default='openai/clip-vit-large-patch14')
-
+    parser.add_argument('--reverse', action='store_true', help='Process segments in reverse order')
     return parser
 
 def get_iterator(args, mode):
     batch_size = args.batch_size
     
     data = np.load(os.path.join(args.anno_root, f'{mode}_info.npy'), allow_pickle=True).item()
-    num = len(data) - 1
+    
+    # Apply sharding
+    keys = list(data.keys())
+    # The last key might be a special key or just string integers, sort them just in case
+    # data is dict of str(int) -> dict
+    # filter out non-digit keys if any (like 'original_info' etc if stored globally, though usually not)
+    keys = sorted([k for k in keys if k.isdigit()], key=lambda x: int(x))
+    
+    sharded_keys = keys[args.shard_id::args.num_shards]
+    if args.reverse:
+        sharded_keys = sharded_keys[::-1]
+    num = len(sharded_keys)
+    
     ds_name = osp.split(args.anno_root)[-1]
     reader = ViTFeatureReader(
         args.model_name, 
@@ -90,39 +118,82 @@ def get_iterator(args, mode):
         cache_dir=args.cache_dir
     )
     
-    def iterate():
-        for i in range(num):
-            fname = data[i]['folder']
-            
-            if ds_name == 'Phoenix14T' or ds_name == 'CSL-Daily':
-                image_list = get_img_list(ds_name, args.video_root, fname)
-                videos = [Image.open(image).convert('RGB') for image in image_list]
+    def iterate(save_path, postfix_template):
+        # Using decord for much faster loading
+        def load_video_decord(path):
+            try:
+                vr = decord.VideoReader(path, num_threads=4)
+                # Decode all frames as a batch
+                frames = vr.get_batch(range(len(vr))).asnumpy()
+                # Convert to list of PIL Images for the processor
+                return [Image.fromarray(f) for f in frames]
+            except Exception as e:
+                # print(f"Error loading {path} with decord: {e}")
+                return read_video(path) # Fallback to PyAV
+
+        def loader_worker(keys_list, queue):
+            for k in keys_list:
+                if stop_requested:
+                    break
+                    
+                item = data[k]
+                fid = item['fileid']
+                fname = osp.join(args.video_root, item['folder'])
                 
+                # Check if video exists to avoid FileNotFoundError
+                if not osp.exists(fname):
+                    print(f"Soft-Skip: Video file not found: {fname}")
+                    queue.put(("SKIPPED", fid, None))
+                    continue
+
+                # Check skip before loading to save CPU
+                target_file = osp.join(save_path, f'{fid}{postfix_template}.npy')
+                if osp.exists(target_file):
+                    queue.put(("SKIPPED", fid, None))
+                    continue
+
+                if ds_name == 'Phoenix14T' or ds_name == 'CSL-Daily':
+                    image_list = get_img_list(ds_name, args.video_root, fname)
+                    videos = [Image.open(image).convert('RGB') for image in image_list]
+                else:
+                    videos = load_video_decord(fname)
+                
+                queue.put((videos, fid, None))
+            queue.put(None) # Sentinel
+
+        # Start pre-fetching thread - reduced to 2 to minimize RAM spikes
+        fetch_queue = Queue(maxsize=2)
+        worker = Thread(target=loader_worker, args=(sharded_keys, fetch_queue))
+        worker.start()
+
+        while True:
+            msg = fetch_queue.get()
+            if msg is None:
+                break
+            
+            videos, fid, _ = msg
+            
+            if videos == "SKIPPED":
+                yield "SKIPPED", fid, None
+                continue
+
+            if len(videos) > 0:
                 video_feats = []
                 for j in range(0, len(videos), batch_size):
                     video_batch = videos[j:min(j + batch_size, len(videos))]
                     feats = reader.get_feats(video_batch).cpu().numpy()
                     video_feats.append(feats)
-                
-                yield np.concatenate(video_feats, axis=0), data[i]['fileid'], None
-            
+                yield np.concatenate(video_feats, axis=0), fid, None
+                # Explicitly clear large memory blocks
+                del videos
+                del video_feats
+                gc.collect()
             else:
-                if ds_name == 'How2Sign':
-                    start_time, end_time = data[i]['original_info']['START_REALIGNED'], data[i]['original_info']['END_REALIGNED']
-                    videos = read_video(fname, start_time=start_time, end_time=end_time)
-            
-                if len(videos) > 0:
-                    video_feats = []
-                    for j in range(0, len(videos), batch_size):
-                        video_batch = videos[j:min(j + batch_size, len(videos))]
-                        feats = reader.get_feats(video_batch).cpu().numpy()
-                        video_feats.append(feats)
-                    yield np.concatenate(video_feats, axis=0), data[i]['fileid'], str(start_time)
-                else:
-                    yield [], data[i]['fileid'], str(start_time)
+                yield [], fid, None
+        
+        worker.join()
     
     return iterate, num
-
 
 def main():
     mode = ["dev", "test", "train"]
@@ -137,30 +208,42 @@ def main():
         os.makedirs(osp.join(args.save_dir, fname, m), exist_ok=True)
     
         if ds_name == 'How2Sign':
-            if m == 'dev': _m = 'val'
-            else: _m = m
+            _m = m
         elif ds_name == 'NIASL2021':
             if m == 'dev': _m = 'validation' 
         else:
             _m = m
 
-        generator, num = get_iterator(args, _m)
-        iterator = generator()
+        save_path_base = osp.join(args.save_dir, fname, m)
+        postfix_template = ""
+        if args.s2_mode != "":
+            postfix_template = f"_{args.s2_mode}"
+        if len(args.scales) == 3:
+            postfix_template = f'{postfix_template}_large'
 
+        generator, num = get_iterator(args, _m)
+        iterator = generator(save_path_base, postfix_template)
+
+        print(f"Starting/Resuming processing for mode: {m}")
         for vit_feat in tqdm.tqdm(iterator, total=num):
             feats, id, st = vit_feat
-            save_path = osp.join(args.save_dir, fname, m)
             
-            postfix = ""
-            if args.s2_mode != "":
-                postfix = f"_{args.s2_mode}"
-            if len(args.scales) == 3:
-                postfix = f'{postfix}_large'
+            # Handle the skip signal
+            if isinstance(feats, str) and feats == "SKIPPED":
+                continue
+
+            postfix = postfix_template
             if st is not None:
                 postfix = f'_{st}{postfix}'
             
-            np.save(osp.join(save_path, f'{id}{postfix}.npy'), feats)
+            np.save(osp.join(save_path_base, f'{id}{postfix}.npy'), feats)
+            
+            if stop_requested:
+                print("Graceful exit requested. Closing.")
+                sys.exit(0)
 
 
+if __name__ == "__main__":
+    main()
 if __name__ == "__main__":
     main()

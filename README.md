@@ -74,13 +74,13 @@ huggingface-cli download google/flan-t5-xl --local-dir ./models/flan-t5-xl
 
 ### 6. Download the SpaMo checkpoint
 
-Download the pre-trained SpaMo checkpoint (includes LoRA weights + adapter layers):
+Download the fine-tuned SpaMo How2Sign checkpoint (includes LoRA weights + adapter layers) trained specifically for American Sign Language (ASL) to English translation:
 
 ```bash
 mkdir -p weights
-# Download from Dropbox:
-# https://www.dropbox.com/scl/fi/c9khflgxgl96lx919p6oq/spamo.ckpt?rlkey=gp3zmk6jwg9cnf3e2hpw268ih&st=u103orvs&dl=0
-# Save as: weights/spamo.ckpt
+# Download from Google Drive:
+# https://drive.google.com/file/d/1huqKMCsJbc0C2zaUiFffqNaYGHKdksJF/view?usp=sharing
+# Save the downloaded file as: weights/spamo_how2sign.ckpt
 ```
 
 
@@ -145,15 +145,18 @@ python scripts/mae_extract_feature.py \
 ```
 
 
-## Translation Pipeline (Inference on New Videos)
+## Translation Pipeline (ASL-to-English live inference via Webcam)
 
-Translate sign language videos using the standalone pipeline:
+Translate your own sign language videos cleanly natively to English using the standalone pipeline:
 
 ### 1. Record a video
 
 ```bash
 python Translation_Pipeline/record_webcam.py
-# Press 'q' to stop recording. Saves to Translation_Pipeline/translation_target/
+# A window will pop up showing your webcam feed.
+# Perform your ASL sign sequence.
+# Press 'q' to stop recording.
+# The video automatically saves to Translation_Pipeline/translation_target/
 ```
 
 ### 2. Run translation
@@ -161,16 +164,17 @@ python Translation_Pipeline/record_webcam.py
 ```bash
 python Translation_Pipeline/translate_video.py \
     --video_path Translation_Pipeline/translation_target/ \
-    --ckpt_path ./weights/spamo.ckpt \
-    --config_path ./configs/finetune.yaml
+    --ckpt_path ./weights/spamo_how2sign.ckpt \
+    --config_path ./configs/finetune_how2sign.yaml
 ```
 
 This will:
 1. Extract frames from the video (center-cropped to 210×260)
 2. Extract spatial features using CLIP ViT-Large (auto-downloaded)
 3. Extract motion features using VideoMAE-Large (auto-downloaded)
-4. Load SpaMo and generate a German translation
-5. Translate the German output to English using Flan-T5's multilingual capability
+4. Load the ASL SpaMo adapter
+5. Feed the fused spatial and motion tokens into the T5 Encoder
+6. Directly print the final English transcription string!
 
 
 ## Project Structure

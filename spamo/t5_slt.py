@@ -4,6 +4,7 @@ import torch.nn as nn
 import random
 import math
 from typing import Dict, List, Optional, Tuple, Any
+from pathlib import Path
 
 import torch.nn.functional as F
 
@@ -54,6 +55,8 @@ class FlanT5SLT(AbstractSLT):
         lora_r: int = 16,
         lora_alpha: int = 32,
         lora_dropout: float = 0.1,
+        num_warmup_steps: Optional[int] = None,
+        min_lr: float = 0.0,
         **kwargs
     ):
         super().__init__(**kwargs)
@@ -80,6 +83,8 @@ class FlanT5SLT(AbstractSLT):
         self.lora_r = lora_r
         self.lora_alpha = lora_alpha
         self.lora_dropout = lora_dropout
+        self.num_warmup_steps = num_warmup_steps
+        self.min_lr = min_lr
         
         self.prepare_models(model_name)
 
@@ -109,10 +114,33 @@ class FlanT5SLT(AbstractSLT):
     #     self.load_state_dict(filtered_state_dict)
     #     print(f'Checkpoint loaded from {checkpoint_path}. Loaded {len(filtered_state_dict)}/{len(checkpoint_state_dict)} parameters.')
     
-    def load_pretrained_weights(self, checkpoint_path):
-        checkpoint = torch.load(checkpoint_path, map_location=self.device)
-        self.load_state_dict(checkpoint['state_dict'])
-        print(f'Checkpoint is loaded from {checkpoint_path}.')
+    def load_pretrained_weights(self, checkpoint_path: str) -> None:
+        """Load weights from a pretrained checkpoint without optimizer states."""
+        checkpoint = torch.load(checkpoint_path, map_location='cpu', weights_only=True)
+        
+        # Get model's state dict
+        model_state_dict = self.state_dict()
+        checkpoint_state_dict = checkpoint['state_dict']
+        
+        # Filter out mismatched keys and handle 'model.' prefix from PL
+        filtered_state_dict = {}
+        for k, v in checkpoint_state_dict.items():
+            # Remove 'model.' prefix if present (PL saves with this prefix)
+            clean_k = k.replace('model.', '') if k.startswith('model.') else k
+            
+            if clean_k in model_state_dict:
+                if v.size() == model_state_dict[clean_k].size():
+                    filtered_state_dict[clean_k] = v
+                else:
+                    print(f"Soft-Resume: Skipping {clean_k}: size mismatch {v.size()} vs {model_state_dict[clean_k].size()}")
+            else:
+                # print(f"Soft-Resume: Skipping {clean_k}: not in model_state_dict")
+                pass
+        
+        # Load the filtered state dict
+        self.load_state_dict(filtered_state_dict, strict=False)
+        print(f'Soft-Resume: Loaded {len(filtered_state_dict)}/{len(checkpoint_state_dict)} tensors from {checkpoint_path}.')
+        print(f'[INFO] Model state dict successfully loaded from {checkpoint_path}.')
 
     def _apply_lora(self) -> None:
         """Apply LoRA adapter to the T5 model."""
@@ -145,14 +173,18 @@ class FlanT5SLT(AbstractSLT):
         Args:
             t5_model: Name or path of the T5 model to use
         """
-        
+        print(f"[INFO] Initializing T5 model ({t5_model}) with bf16 and low_cpu_mem_usage...")
         # Load the textual model
         self.t5_model = T5ForConditionalGeneration.from_pretrained(
             t5_model, 
             cache_dir=self.cache_dir,
-            torch_dtype=torch.bfloat16, 
+            torch_dtype=torch.bfloat16,
+            low_cpu_mem_usage=True,
         )
+        # Enable gradient checkpointing to save memory for larger batches
+        self.t5_model.gradient_checkpointing_enable()
         
+        print(f"[INFO] Loading tokenizer from {t5_model}...")
         # Load the tokenizer
         self.t5_tokenizer = AutoTokenizer.from_pretrained(
             t5_model, 
@@ -160,11 +192,13 @@ class FlanT5SLT(AbstractSLT):
             max_length=self.max_txt_len,
         )
 
+        print(f"[INFO] Building vision projectors...")
         # Load the vision projectors
         self.spatio_proj = build_vision_projector('linear', self.input_size, self.inter_hidden)
         self.spatiotemp_proj = build_vision_projector('linear', 1024, self.inter_hidden)
         self.fusion_proj = build_vision_projector('mlp2x_gelu', self.inter_hidden, self.t5_model.config.hidden_size)
         
+        print(f"[INFO] Building temporal encoder...")
         # Load the temporal encoder
         self.temporal_encoder = TemporalConv(self.inter_hidden, self.inter_hidden)
 
@@ -208,6 +242,9 @@ class FlanT5SLT(AbstractSLT):
             truncation=True,
             return_tensors="pt",
         ).to(self.device)
+        
+        if len(visual_outputs) == 0:
+            return torch.tensor([], device=self.device), torch.tensor([], device=self.device), input_tokens, torch.tensor([], device=self.device)
         
         # Get lengths for visual and prompt sequences
         visual_lengths = visual_mask.sum(1)
@@ -262,13 +299,25 @@ class FlanT5SLT(AbstractSLT):
 
         # Process spatial features if needed
         if spatial:
-            pixel_values = pad_sequence(samples['pixel_values'], batch_first=True)
+            if not samples['pixel_values']:
+                return torch.tensor([], device=self.device), torch.tensor([], device=self.device)
+            # Final safety check for shapes
+            pixel_list = [p for p in samples['pixel_values'] if p.dim() == 2 and p.shape[1] == self.input_size]
+            if not pixel_list:
+                return torch.tensor([], device=self.device), torch.tensor([], device=self.device)
+            pixel_values = pad_sequence(pixel_list, batch_first=True)
             spatial_outputs = self.spatio_proj(pixel_values)
             spatial_mask = create_mask(seq_lengths=samples['num_frames'], device=self.device)
         
         # Process spatiotemporal features if needed
         if spatiotemporal:
-            spatiotemporal_outputs = pad_sequence(samples['glor_values'], batch_first=True)
+            if not samples['glor_values']:
+                return torch.tensor([], device=self.device), torch.tensor([], device=self.device)
+            # Final safety check for shapes - VideoMAE hidden size is always 1024
+            glor_list = [g for g in samples['glor_values'] if g.dim() == 2 and g.shape[1] == 1024]
+            if not glor_list:
+                 return torch.tensor([], device=self.device), torch.tensor([], device=self.device)
+            spatiotemporal_outputs = pad_sequence(glor_list, batch_first=True)
             spatiotemporal_outputs = self.spatiotemp_proj(spatiotemporal_outputs)
             spatiotemporal_mask = create_mask(seq_lengths=samples['glor_lengths'], device=self.device)
         
@@ -279,14 +328,48 @@ class FlanT5SLT(AbstractSLT):
             spatiotemporal_length = spatiotemporal_mask.sum(1)
             new_length = spatial_length + spatiotemporal_length
             
-            # Concatenate spatial and spatiotemporal features for each sample
+            # Integrate ME features via index-based insertion for chronological synchronization
+            # Assuming typical motion encoder stride of 8 frames
+            stride = 8
             joint_outputs = []
             for i in range(bs):
                 valid_spatial_output = spatial_outputs[i, :spatial_length[i], :]
                 valid_spatiotemporal_output = spatiotemporal_outputs[i, :spatiotemporal_length[i], :]
-                concat_sample = torch.cat((valid_spatial_output, valid_spatiotemporal_output), dim=0)
+                
+                interleaved = []
+                s_idx = 0
+                st_idx = 0
+                T_s = valid_spatial_output.size(0)
+                T_st = valid_spatiotemporal_output.size(0)
+                
+                while s_idx < T_s or st_idx < T_st:
+                    next_s_idx = min(s_idx + stride, T_s)
+                    if next_s_idx > s_idx:
+                        interleaved.append(valid_spatial_output[s_idx:next_s_idx])
+                        s_idx = next_s_idx
+                    
+                    if st_idx < T_st:
+                        interleaved.append(valid_spatiotemporal_output[st_idx:st_idx+1])
+                        st_idx += 1
+                        
+                # Fix edge case where both are empty (though soft-skip should prevent this)
+                if interleaved:
+                    concat_sample = torch.cat(interleaved, dim=0)
+                else:
+                    concat_sample = torch.empty((0, valid_spatial_output.shape[-1]), device=self.device)
                 joint_outputs.append(concat_sample)
             joint_outputs = pad_sequence(joint_outputs, batch_first=True)
+            
+            # Ensure minimum length for temporal encoder (2 layers K5, P2 requires at least 22 frames to avoid L=1 output)
+            min_len = 22
+            if joint_outputs.shape[1] < min_len:
+                padding_size = min_len - joint_outputs.shape[1]
+                joint_outputs = torch.cat([
+                    joint_outputs, 
+                    torch.zeros(joint_outputs.shape[0], padding_size, joint_outputs.shape[2], device=self.device)
+                ], dim=1)
+                # Update new_length for valid samples (others are already filtered or handled)
+                new_length = torch.clamp(new_length, min=min_len)
             
             # Apply temporal encoder
             visual_conv_outputs = self.temporal_encoder(
@@ -333,9 +416,36 @@ class FlanT5SLT(AbstractSLT):
         ex_lang_translations = []
         
         max_frame_len = self.max_frame_len
-
+        
         for sample in batch:
-            if sample['pixel_value'].shape[0] != 0:
+            # Robust check for feature existence and dimensions
+            spatial_valid = (sample['pixel_value'] is not None and 
+                            sample['pixel_value'].dim() == 2 and 
+                            sample['pixel_value'].shape[0] > 0 and 
+                            sample['pixel_value'].shape[1] == self.input_size)
+            
+            # For spatiotemporal, it might be a list or a tensor
+            glor_val = sample['glor_value']
+            spatiotemporal_valid = False
+            if glor_val is not None:
+                if isinstance(glor_val, list):
+                    spatiotemporal_valid = all(v.dim() == 2 and v.shape[1] == 1024 for v in glor_val if v.shape[0] > 0)
+                else:
+                    spatiotemporal_valid = (glor_val.dim() == 2 and 
+                                           glor_val.shape[0] > 0 and 
+                                           glor_val.shape[1] == 1024)
+
+            # Determine eligibility based on fusion mode
+            if self.fusion_mode == 'joint':
+                eligible = spatial_valid and spatiotemporal_valid
+            elif self.fusion_mode == 'spatial':
+                eligible = spatial_valid
+            elif self.fusion_mode == 'spatiotemporal':
+                eligible = spatiotemporal_valid
+            else:
+                eligible = spatial_valid or spatiotemporal_valid
+
+            if eligible:
                 # Calculate number of frames after sampling
                 nframe = math.ceil(sample['num_frames'] / self.frame_sample_rate)
                 pval = sample['pixel_value'][::self.frame_sample_rate]
@@ -346,11 +456,16 @@ class FlanT5SLT(AbstractSLT):
                 glosses.append(sample['gloss'])
                 langs.append(sample['lang'])
                 
-                _ex_lang_trans = [
-                    f"{sample['en_text']}={sample['text']}",
-                    f"{sample['fr_text']}={sample['text']}",
-                    f"{sample['es_text']}={sample['text']}"
-                ]
+                _ex_lang_trans = []
+                if sample.get('en_text') and sample.get('fr_text') and sample.get('es_text'):
+                    _ex_lang_trans = [
+                        f"{sample['en_text']}={sample['text']}",
+                        f"{sample['fr_text']}={sample['text']}",
+                        f"{sample['es_text']}={sample['text']}"
+                    ]
+                elif sample.get('en_text'):
+                    _ex_lang_trans = [f"{sample['en_text']}={sample['text']}"]
+                    
                 _ex_lang_trans = _ex_lang_trans[:self.num_in_context]
                 ex_lang_translations.append(' '.join(_ex_lang_trans))
                 
@@ -364,14 +479,16 @@ class FlanT5SLT(AbstractSLT):
                 num_frames.append(nframe)
                 pixel_values.append(pval)
                 
-                # Process glor values if available
-                if sample['glor_value'] is not None:
-                    if isinstance(sample['glor_value'], list):
-                        glor_values.append(torch.cat(sample['glor_value'], dim=0))
-                        glor_lengths.append(sum(len(g) for g in sample['glor_value']))
+                # Process glor values if available - they are already validated as 'eligible'
+                if glor_val is not None:
+                    if isinstance(glor_val, list):
+                        glor_values.append(torch.cat(glor_val, dim=0))
+                        glor_lengths.append(sum(len(g) for g in glor_val))
                     else:
-                        glor_values.append(sample['glor_value'])
-                        glor_lengths.append(len(sample['glor_value']))
+                        glor_values.append(glor_val)
+                        glor_lengths.append(len(glor_val))
+            else:
+                print(f"[SOFT-SKIP] Corrupt or missing features for sample ID: {sample['id']}")
         
         ex_lang_translations = derangement(ex_lang_translations)
         
@@ -443,6 +560,11 @@ class FlanT5SLT(AbstractSLT):
         """
         # Prepare visual inputs and project to match text embedding dimensions
         visual_outputs, visual_masks = self.prepare_visual_inputs(inputs)
+        
+        # Skip if no valid visual features in batch
+        if visual_outputs.numel() == 0:
+            return torch.tensor(0.0, device=self.device, requires_grad=True), {}
+            
         visual_outputs = self.fusion_proj(visual_outputs)
         
         # Initialize logging dictionary
@@ -566,19 +688,24 @@ class FlanT5SLT(AbstractSLT):
             print(f"\033[92mGenerated: {self.generated[i]}\033[0m")    # Green color for generated
             print("-" * 50)
             
-        # Calculate evaluation metrics
-        eval_res = evaluate_results(
-            predictions=self.generated,
-            references=self.references,
-            split='val',
-            # tokenizer='zh' if outputs['lang'][0] == 'Chinese' else '13a',
-            device=self.device
-        )
-        
-        # Add evaluation results to logging
-        # log_dict.update(eval_res)
-
-        self.log_dict(eval_res, sync_dist=True)
+        # Calculate evaluation metrics if we have data
+        if len(self.generated) > 0:
+            eval_res = evaluate_results(
+                predictions=self.generated,
+                references=self.references,
+                split='val',
+                # tokenizer='zh' if outputs['lang'][0] == 'Chinese' else '13a',
+                device=self.device
+            )
+            
+            self.log_dict(eval_res, sync_dist=True)
+        else:
+            # Satisfy EarlyStopping/ModelCheckpoint by logging a neutral value
+            # This happens on resume if no batches have been processed yet.
+            if self.monitor is not None:
+                self.log_dict({self.monitor: 0.0}, sync_dist=True)
+            else:
+                self.log_dict({"val/bleu4": 0.0}, sync_dist=True)
 
         self.set_container()
 
@@ -590,15 +717,17 @@ class FlanT5SLT(AbstractSLT):
             print(f"\033[92mGenerated: {self.generated[i]}\033[0m")    # Green color for generated
             print("-" * 50)
             
-        # Calculate evaluation metrics
-        eval_res = evaluate_results(
-            predictions=self.generated,
-            references=self.references,
-            split='test',
-            device=self.device
-        )
+        # Calculate evaluation metrics if we have data
+        if len(self.generated) > 0:
+            eval_res = evaluate_results(
+                predictions=self.generated,
+                references=self.references,
+                split='test',
+                device=self.device
+            )
 
-        self.log_dict(eval_res, sync_dist=True)
+            self.log_dict(eval_res, sync_dist=True)
+            
         self.set_container()
 
     def configure_optimizers(self):
@@ -611,7 +740,7 @@ class FlanT5SLT(AbstractSLT):
         )
         
         # Calculate total steps based on PyTorch Lightning trainer settings
-        if hasattr(self.trainer, 'estimated_stepping_batches'):
+        if hasattr(self.trainer, 'estimated_stepping_batches') and self.trainer.estimated_stepping_batches > 0:
             total_steps = self.trainer.estimated_stepping_batches
         else:
             # Fallback calculation if the attribute doesn't exist
@@ -627,13 +756,25 @@ class FlanT5SLT(AbstractSLT):
             if hasattr(self.trainer, 'accumulate_grad_batches'):
                 total_steps = total_steps // self.trainer.accumulate_grad_batches
         
-        warmup_steps = int(total_steps * 0.1)
+        # Determine warmup steps (explicitly provided or 10% of total)
+        if self.num_warmup_steps is not None:
+            warmup_steps = self.num_warmup_steps
+        else:
+            warmup_steps = int(total_steps * 0.1)
 
-        scheduler = get_cosine_schedule_with_warmup(
-            optimizer=optimizer,
-            num_warmup_steps=warmup_steps,
-            num_training_steps=total_steps,
-        )
+        # Custom scheduler function for Linear Warmup + Cosine Decay + Min LR
+        def lr_lambda(current_step):
+            if current_step < warmup_steps:
+                return float(current_step) / float(max(1, warmup_steps))
+            
+            progress = float(current_step - warmup_steps) / float(max(1, total_steps - warmup_steps))
+            cosine_decay = 0.5 * (1.0 + math.cos(math.pi * min(1.0, progress)))
+            
+            # Scale to range [min_lr, lr]
+            lr_scale = (self.min_lr / self.lr) + (1.0 - self.min_lr / self.lr) * cosine_decay
+            return max(0.0, lr_scale)
+
+        scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
 
         return {
             "optimizer": optimizer,

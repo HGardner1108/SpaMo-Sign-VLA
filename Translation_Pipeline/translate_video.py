@@ -28,8 +28,8 @@ def get_args():
     
     script_dir = os.path.dirname(os.path.abspath(__file__))
     default_video = os.path.join(script_dir, 'translation_target')
-    default_ckpt = os.path.join(script_dir, '..', 'weights', 'spamo.ckpt')
-    default_cfg = os.path.join(script_dir, '..', 'configs', 'finetune.yaml')
+    default_ckpt = os.path.join(script_dir, '..', 'logs', '2026-03-27T23-05-35_spamo_how2sign', 'checkpoints', 'last.ckpt')
+    default_cfg = os.path.join(script_dir, '..', 'configs', 'finetune_how2sign.yaml')
     
     parser.add_argument('--video_path', type=str, default=default_video, help="Path to input video file or folder (e.g., translation_target/)")
     parser.add_argument('--ckpt_path', type=str, default=default_ckpt, help="Path to SpaMo checkpoint")
@@ -225,7 +225,7 @@ def translate(model, spatial_feats, motion_feats):
         'glor_lengths': [motion_tensor.shape[0]],  # List of ints
         'ids': ['inference_video'],
         'text': ['placeholder.'],                  # Needed by prepare_inputs
-        'lang': ['German'],                        # Model was trained on German
+        'lang': ['English'],                       # Model was trained on English (How2Sign)
         'ex_lang_trans': [''],                     # Empty in-context
         'gloss': [''],
     }
@@ -333,20 +333,9 @@ def main():
     # 5. Translate
     translation = translate(model, spatial_feats, motion_feats)
     
-    # 6. Translate German -> English using the same T5 model
-    with torch.no_grad():
-        en_input = model.t5_tokenizer(
-            f"Translate German to English: {translation}",
-            return_tensors="pt", max_length=256, truncation=True
-        ).to(DEVICE)
-        en_output = model.t5_model.generate(**en_input, max_length=256, num_beams=5)
-        english = model.t5_tokenizer.decode(en_output[0], skip_special_tokens=True)
-    
     print("\n" + "="*50)
-    print("FINAL TRANSLATION (German):")
+    print("FINAL TRANSLATION:")
     print(translation)
-    print("\nENGLISH:")
-    print(english)
     print("="*50 + "\n")
 
 if __name__ == "__main__":

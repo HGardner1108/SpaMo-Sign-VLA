@@ -84,6 +84,8 @@ features/
 
 # Dataset binary data (~119GB) — keeps dataset/*.py code files tracked
 dataset/Phoenix14T/
+dataset/How2Sign/
+dataset/CSL-Daily/
 
 # Translation pipeline test outputs
 Translation_Pipeline/translation_target/

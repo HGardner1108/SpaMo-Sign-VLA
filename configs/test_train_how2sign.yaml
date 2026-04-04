@@ -1,0 +1,90 @@
+model:
+  target: spamo.t5_slt.FlanT5SLT
+  
+  params:     
+    lr: 1.0e-4
+    num_warmup_steps: 10000
+    min_lr: 5.0e-5
+    monitor: val/bleu4
+    model_name: google/flan-t5-xl
+    cache_dir: ./models
+    inter_hidden: 768
+    input_size: 2048
+    beam_size: 3
+    max_frame_len: 512
+    max_txt_len: 64
+    frame_sample_rate: 1
+    prompt: "Translate the given sentence into {}."
+    tuning_type: lora
+    lora_r: 16
+    lora_alpha: 32
+    lora_dropout: 0.1
+    fusion_mode: joint
+    warm_up_steps: 15000  # Alignment warm-up
+    cross_modal_align: true
+    combined_loss: true
+    alpha: 1.0
+    use_in_context: false
+    num_in_context: 0
+
+lightning:
+  callback:
+    learning_rate_logger:
+      target: pytorch_lightning.callbacks.LearningRateMonitor
+      params:
+        logging_interval: step
+  trainer:
+    accumulate_grad_batches: 1
+    accelerator: gpu
+    devices: 1
+    max_epochs: 1000
+    gradient_clip_val: 1.0
+    check_val_every_n_epoch: 1000  # Effectively disabled
+    precision: bf16
+    limit_val_batches: 0.0  # Completely disable validation batches
+    num_sanity_val_steps: 0
+
+data:
+  target: dataset.datamodule.DataModuleFromConfig
+  params:
+    batch_size: 8
+    num_workers: 8
+  
+    train:
+      target: dataset.how2sign.How2Sign
+      params:
+        anno_root: ./preprocess/How2Sign
+        vid_root: ./dataset/How2Sign/sentence_level
+        feat_root: ./features/spatial/clip-vit-large-patch14_feat_How2Sign
+        mae_feat_root: ./features/motion/mae_feat_How2Sign
+        mode: train
+        spatial: true
+        spatiotemporal: true
+        spatial_postfix: _s2wrapping
+        spatiotemporal_postfix: _overlap-8
+        
+    validation:
+      target: dataset.how2sign.How2Sign
+      params:
+        anno_root: ./preprocess/How2Sign
+        vid_root: ./dataset/How2Sign/sentence_level
+        feat_root: ./features/spatial/clip-vit-large-patch14_feat_How2Sign
+        mae_feat_root: ./features/motion/mae_feat_How2Sign
+        mode: test
+        spatial: true
+        spatiotemporal: true
+        spatial_postfix: _s2wrapping
+        spatiotemporal_postfix: _overlap-8
+    
+    test:
+      target: dataset.how2sign.How2Sign
+      params:
+        anno_root: ./preprocess/How2Sign
+        vid_root: ./dataset/How2Sign/sentence_level
+        feat_root: ./features/spatial/clip-vit-large-patch14_feat_How2Sign
+        mae_feat_root: ./features/motion/mae_feat_How2Sign
+        mode: train
+        spatial: true
+        spatiotemporal: true
+        spatial_postfix: _s2wrapping
+        spatiotemporal_postfix: _overlap-8

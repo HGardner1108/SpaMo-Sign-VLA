@@ -3,16 +3,18 @@ import importlib
 import random
 import os
 import glob
+import av
 
 
 def derangement(lst):
-    if len(lst) <= 1:
+    if len(lst) <= 1 or len(set(lst)) <= 1:
         return lst
     shuffled = lst[:]
-    while True:
+    for _ in range(100): # Limit attempts to prevent infinite loop
         random.shuffle(shuffled)
         if all(original != shuffled[i] for i, original in enumerate(lst)):
             return shuffled
+    return shuffled # Fallback to a random shuffle if no derangement found
 
 
 def normalize(x):

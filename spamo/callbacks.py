@@ -84,4 +84,30 @@ class SetupCallback(Callback):
             OmegaConf.save(OmegaConf.create({"lightning": self.lightning_config}),
                            os.path.join(self.cfgdir, "{}-lightning.yaml".format(self.now)))
 
+
+class LossLoggingCallback(Callback):
+    """
+    Callback to log training loss to a file at the end of each epoch.
+    """
+    def __init__(self, logdir):
+        super().__init__()
+        self.log_path = os.path.join(logdir, "training_loss.log")
+
+    def on_train_epoch_end(self, trainer, pl_module):
+        # Determine if warm-up is complete
+        warm_up_steps = getattr(pl_module, 'warm_up_steps', 0) or 0
+        if trainer.global_step < warm_up_steps:
+            return
+
+        # Get average training loss from metrics
+        # 'train/loss' is usually logged in shared_step
+        metrics = trainer.callback_metrics
+        loss = metrics.get('train/loss')
+        
+        if loss is not None:
+            epoch = trainer.current_epoch
+            step = trainer.global_step
+            with open(self.log_path, "a") as f:
+                f.write(f"Epoch {epoch} | Step {step} | Loss: {loss:.4f}\n")
+
         
