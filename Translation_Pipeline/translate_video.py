@@ -28,7 +28,7 @@ def get_args():
     
     script_dir = os.path.dirname(os.path.abspath(__file__))
     default_video = os.path.join(script_dir, 'translation_target')
-    default_ckpt = os.path.join(script_dir, '..', 'logs', '2026-03-27T23-05-35_spamo_how2sign', 'checkpoints', 'last.ckpt')
+    default_ckpt = os.path.join(script_dir, '..', 'weights', 'spamo_how2sign.ckpt')
     default_cfg = os.path.join(script_dir, '..', 'configs', 'finetune_how2sign.yaml')
     
     parser.add_argument('--video_path', type=str, default=default_video, help="Path to input video file or folder (e.g., translation_target/)")

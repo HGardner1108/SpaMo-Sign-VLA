@@ -25,10 +25,7 @@ DEVICE = 'cuda:0' if torch.cuda.is_available() else 'cpu'
 
 def get_args():
     script_dir = os.path.dirname(os.path.abspath(__file__))
-    default_ckpt = os.path.join(
-        script_dir, '..', 'logs',
-        '2026-03-27T23-05-35_spamo_how2sign', 'checkpoints', 'last.ckpt'
-    )
+    default_ckpt = os.path.join(script_dir, '..', 'weights', 'spamo_how2sign.ckpt')
     default_cfg = os.path.join(script_dir, '..', 'configs', 'finetune_how2sign.yaml')
     default_out = os.path.join(script_dir, 'translation_target')
 
@@ -43,6 +40,12 @@ def get_args():
     parser.add_argument('--groot_host', type=str, default='localhost')
     parser.add_argument('--groot_port', type=int, default=9999)
     parser.add_argument('--output_dir', type=str, default=default_out)
+    parser.add_argument('--output_file', type=str, default=None,
+                        help="Write the translated sentence to this file after each recording "
+                             "(e.g. /tmp/spamo_command.txt). The VLA process can watch this file.")
+    parser.add_argument('--print-only', action='store_true',
+                        help="Print the translation and skip the GR00T N1 API call entirely. "
+                             "Use this when sending manually via the VLA interface.")
     return parser.parse_args()
 
 
@@ -172,6 +175,15 @@ def main():
             print(f"  {translation}")
             print("=" * 50)
 
+            if args.output_file:
+                with open(args.output_file, 'w') as f:
+                    f.write(translation + '\n')
+                print(f"[VLA] Sentence written to: {args.output_file}")
+
+            if args.print_only:
+                print("\n>>> Copy the sentence above into the VLA interface manually. <<<\n")
+                continue
+
             if args.confirm:
                 confirm_input = input("Send this command to GR00T N1? [y/N]: ").strip().lower()
                 if confirm_input != 'y':
@@ -183,7 +195,7 @@ def main():
             if response is not None:
                 print(f"[GR00T N1] Response: {response}")
             else:
-                print("[GR00T N1] No response received.")
+                print("[GR00T N1] No response received (stub — implement send_to_groot for your API).")
 
         finally:
             shutil.rmtree(temp_dir, ignore_errors=True)
